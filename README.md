@@ -69,7 +69,7 @@ export STRIPE_API_URL=https://api.stripe.com
 go run ./cmd/gateway
 ```
 
-In live mode the mock server does not start. Stripe instances use the API key submitted during install. GitHub and Slack use their registered OAuth applications and the configured public callback URL. Register that exact callback URL with both apps and configure provider webhook signing secrets to match `BRIDGEKIT_WEBHOOK_SECRET`. Live mode requires production settings, an encryption key, and a 32-character API bearer token before it starts. `/v1/` routes require `Authorization: Bearer $BRIDGEKIT_API_TOKEN`; the dashboard prompts once per tab and keeps the token in session storage. The same gateway routes, encrypted SQLite credential storage, and retry client serve both modes.
+In live mode the mock server does not start. Stripe instances use the API key submitted during install. GitHub and Slack use their registered OAuth applications and the configured public callback URL. Register that exact callback URL with both apps. Live mode requires production settings, an encryption key, and a 32-character API bearer token before it starts. `/v1/` routes require `Authorization: Bearer $BRIDGEKIT_API_TOKEN`; the dashboard prompts once per tab and keeps the token in session storage. The same gateway routes, encrypted SQLite credential storage, and retry client serve both modes. Live inbound Slack/Stripe webhook secret configuration is not complete yet; do not rely on those webhook routes for production delivery.
 
 ## What it does
 
