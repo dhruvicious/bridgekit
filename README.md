@@ -23,7 +23,7 @@
 
 ## Quick start
 
-No API keys, signup, or config needed.
+The local mock mode needs no API keys or configuration. For real provider APIs, see [Live provider mode](#live-provider-mode).
 
 From the repository root:
 
@@ -49,6 +49,27 @@ Open **http://localhost:8080/ui/**.
 5. Install Slack or GitHub to see the OAuth2 flow: redirect, consent on the mock provider, callback, token exchange.
 6. **Metrics** links to `/metrics` (Prometheus) and `/docs` (Swagger UI).
 
+
+## Live provider mode
+
+Bridgekit can call the real GitHub REST API, Slack Web API, and Stripe API. Configure OAuth apps for GitHub and Slack, register `https://your-gateway-host/oauth/callback` as each app’s callback URL, and set:
+
+```sh
+export BRIDGEKIT_MODE=live
+export BRIDGEKIT_ENV=production
+export BRIDGEKIT_API_TOKEN="$(openssl rand -hex 32)"
+export BRIDGEKIT_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+export BRIDGEKIT_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+export BRIDGEKIT_PUBLIC_URL=https://your-gateway-host
+export GITHUB_CLIENT_ID=...
+export GITHUB_CLIENT_SECRET=...
+export SLACK_CLIENT_ID=...
+export SLACK_CLIENT_SECRET=...
+export STRIPE_API_URL=https://api.stripe.com
+go run ./cmd/gateway
+```
+
+In live mode the mock server does not start. Stripe instances use the API key submitted during install. GitHub and Slack use their registered OAuth applications and the configured public callback URL. Live mode requires production settings and a dedicated encryption key before it will start, so real credentials are never written under the demo key. The same gateway routes, encrypted SQLite credential storage, and retry client serve both modes.
 
 ## What it does
 
@@ -110,12 +131,18 @@ Nothing is required for the local demo. For a real deployment, copy `.env.exampl
 
 | Variable | Purpose |
 |---|---|
-| `BRIDGEKIT_ENV` | Set to `production` to require an encryption key and webhook secret at startup |
+| `BRIDGEKIT_MODE` | `mock` (default) or `live`; live mode disables the local simulator and uses real provider APIs |
+| `BRIDGEKIT_PUBLIC_URL` | Public base URL used to construct the OAuth callback in live mode |
+| `BRIDGEKIT_API_TOKEN` | At least 32 characters; protects `/v1/` API routes in live/production mode |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Registered GitHub OAuth app credentials for live mode |
+| `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | Registered Slack app credentials for live mode |
+| `GITHUB_API_URL`, `SLACK_API_URL`, `STRIPE_API_URL` | Provider API base URLs; defaults are the official APIs |
+| `BRIDGEKIT_ENV` | Set to `production` to require encryption, webhook secret, and API token settings; required for live mode |
 | `BRIDGEKIT_ENCRYPTION_KEY` | Base64 of 32 random bytes (`openssl rand -base64 32`), or a raw 32-character string; encrypts stored credentials. Development mode uses a built-in key, so set your own for real data. |
 | `BRIDGEKIT_WEBHOOK_SECRET` | Shared HMAC secret for webhook signatures. Required in production; the built-in default is public. |
 | `BRIDGEKIT_ALERT_WEBHOOK_URL` | Optional URL that receives drift alerts |
 
-Flags on `cmd/gateway`: `-addr` (default `:8080`), `-db` (default `./bridgekit.db`), `-mock-addr` (default `:8081`; the mock provider always runs), `-webhook-secret`.
+Flags on `cmd/gateway`: `-addr`, `-db`, `-mode` (`mock` or `live`), `-public-url`, `-mock-addr`, and `-webhook-secret`.
 
 ## Adding a connector
 
@@ -151,10 +178,8 @@ Covers the SDK (client, pagination, webhooks), the Stripe connector, the gateway
 
 ## Roadmap
 
-- Make provider base URLs configurable so connectors can target live APIs as well as the mock.
 - Move drift probe construction into the `Connector` interface so any connector can be monitored.
-- Add gateway API authentication.
-- Add tests for the Slack and GitHub connectors.
+- Add broader provider behavior tests for Slack and GitHub, including OAuth and webhook cases.
 
 ## License
 

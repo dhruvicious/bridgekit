@@ -53,6 +53,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/services/slack/oauth/token", s.handleSlackToken)
 	mux.HandleFunc("/services/github/login/oauth/access_token", s.handleGitHubToken)
 	mux.HandleFunc("/services/slack/chat.postMessage", s.handleSlackPostMessage)
+	mux.HandleFunc("/services/slack/auth.test", s.handleSlackAuthTest)
 	mux.HandleFunc("/services/github/repos/", s.handleGitHubIssues)
 	mux.HandleFunc("/services/stripe/v1/charges", s.handleStripeListCharges)
 
@@ -146,6 +147,28 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		"expires_in":    3600,
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleSlackAuthTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	drift := s.driftSlack
+	s.mu.RUnlock()
+	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer mock_slack_access_token_") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false,"error":"invalid_auth"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if drift {
+		_, _ = w.Write([]byte(`{"ok":true,"team_name":"Mock Workspace","workspace_id":"T_MOCK"}`))
+		return
+	}
+	_, _ = w.Write([]byte(`{"ok":true,"url":"https://mock.slack.local/","team":"Mock Workspace","user":"mockbot","team_id":"T_MOCK","user_id":"U_MOCK"}`))
 }
 
 func (s *Server) handleSlackPostMessage(w http.ResponseWriter, r *http.Request) {

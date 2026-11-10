@@ -17,6 +17,8 @@ import (
 // Connector is the GitHub connector.
 type Connector struct {
 	mockBaseURL string
+	apiBaseURL  string
+	oauth       sdk.OAuth2Config
 }
 
 // New returns a GitHub connector; an empty mockBaseURL means the mock provider at
@@ -25,7 +27,33 @@ func New(mockBaseURL string) *Connector {
 	if mockBaseURL == "" {
 		mockBaseURL = "localhost:8081"
 	}
-	return &Connector{mockBaseURL: mockBaseURL}
+	return &Connector{mockBaseURL: mockBaseURL, apiBaseURL: "http://" + mockBaseURL}
+}
+
+// NewLive configures the connector for GitHub’s production REST and OAuth APIs.
+func NewLive(apiBaseURL, clientID, clientSecret, redirectURL string) *Connector {
+	return &Connector{apiBaseURL: strings.TrimRight(apiBaseURL, "/"), oauth: sdk.OAuth2Config{
+		AuthURL:  "https://github.com/login/oauth/authorize",
+		TokenURL: "https://github.com/login/oauth/access_token",
+		ClientID: clientID, ClientSecret: clientSecret, RedirectURL: redirectURL,
+		Scopes: []string{"repo", "read:user"},
+	}}
+}
+
+func (c *Connector) APIBaseURL() string { return c.apiBaseURL }
+
+func (c *Connector) issuesPath(owner, repo string) string {
+	if c.mockBaseURL != "" {
+		return issuesPath(owner, repo)
+	}
+	return "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/issues"
+}
+
+func (c *Connector) issuePathTemplate() string {
+	if c.mockBaseURL != "" {
+		return "/services/github/repos/{owner}/{repo}/issues"
+	}
+	return "/repos/{owner}/{repo}/issues"
 }
 
 // CreateIssueInput is the body for create_issue; Owner and Repo may instead come as
@@ -55,19 +83,15 @@ func (c *Connector) Metadata() sdk.ConnectorMetadata {
 		Name:        "GitHub",
 		Description: "Create issues and list issue history in repositories.",
 		Category:    "Developer Tools",
-		Scopes:      []string{"repo", "user"},
+		Scopes:      []string{"repo", "read:user"},
 	}
 }
 
 func (c *Connector) AuthConfig() sdk.AuthConfig {
-	return sdk.AuthConfig{
-		Type: sdk.AuthTypeOAuth2,
-		OAuth2: &sdk.OAuth2Config{
-			AuthURL:  fmt.Sprintf("http://%s/mock/oauth/authorize", c.mockBaseURL),
-			TokenURL: fmt.Sprintf("http://%s/services/github/login/oauth/access_token", c.mockBaseURL),
-			Scopes:   []string{"repo", "user"},
-		},
+	if c.mockBaseURL != "" {
+		return sdk.AuthConfig{Type: sdk.AuthTypeOAuth2, OAuth2: &sdk.OAuth2Config{AuthURL: fmt.Sprintf("http://%s/mock/oauth/authorize", c.mockBaseURL), TokenURL: fmt.Sprintf("http://%s/services/github/login/oauth/access_token", c.mockBaseURL), Scopes: []string{"repo", "user"}}}
 	}
+	return sdk.AuthConfig{Type: sdk.AuthTypeOAuth2, OAuth2: &c.oauth}
 }
 
 func (c *Connector) Endpoints() []sdk.EndpointDefinition {
@@ -75,7 +99,7 @@ func (c *Connector) Endpoints() []sdk.EndpointDefinition {
 		{
 			Name:         "create_issue",
 			Method:       "POST",
-			Path:         "/services/github/repos/{owner}/{repo}/issues",
+			Path:         c.issuePathTemplate(),
 			Description:  "Create a new issue in a GitHub repository.",
 			InputSchema:  &CreateIssueInput{},
 			OutputSchema: &Issue{},
@@ -84,7 +108,7 @@ func (c *Connector) Endpoints() []sdk.EndpointDefinition {
 		{
 			Name:         "list_issues",
 			Method:       "GET",
-			Path:         "/services/github/repos/{owner}/{repo}/issues",
+			Path:         c.issuePathTemplate(),
 			Description:  "List issues for a GitHub repository.",
 			OutputSchema: &[]Issue{},
 			Execute:      c.executeListIssues,
@@ -118,7 +142,7 @@ func (c *Connector) executeCreateIssue(ctx context.Context, client *sdk.HTTPClie
 		return sdk.Response{}, sdk.NewPermanentError("owner, repo, and title are required", http.StatusBadRequest, nil)
 	}
 
-	path := issuesPath(owner, repo)
+	path := c.issuesPath(owner, repo)
 
 	payloadBytes, err := json.Marshal(map[string]string{
 		"title": input.Title,
@@ -158,7 +182,7 @@ func (c *Connector) executeListIssues(ctx context.Context, client *sdk.HTTPClien
 		return sdk.Response{}, sdk.NewPermanentError("owner and repo are required params", http.StatusBadRequest, nil)
 	}
 
-	path := issuesPath(owner, repo)
+	path := c.issuesPath(owner, repo)
 	reqURL, err := url.Parse(path)
 	if err != nil {
 		return sdk.Response{}, sdk.NewPermanentError("invalid path", http.StatusInternalServerError, err)
@@ -196,7 +220,7 @@ func (c *Connector) executeListIssues(ctx context.Context, client *sdk.HTTPClien
 func (c *Connector) listIssuesPaginator(path string, params map[string]string, limit int) sdk.Paginator {
 	owner := params["owner"]
 	repo := params["repo"]
-	resolvedPath := issuesPath(owner, repo)
+	resolvedPath := c.issuesPath(owner, repo)
 	reqURL, _ := url.Parse(resolvedPath)
 	q := reqURL.Query()
 	for k, v := range params {

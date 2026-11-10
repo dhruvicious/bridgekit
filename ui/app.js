@@ -22,6 +22,7 @@
 /** @typedef {{ abbr: string }} ConnectorMeta */
 
 const API = '';   // Same origin — no base URL prefix needed
+const API_TOKEN_KEY = 'bridgekit-api-token';
 
 // ─── Connector meta (initials shown in the neutral connector tile) ───────────
 /** @type {Record<string, ConnectorMeta>} */
@@ -387,7 +388,7 @@ async function executeEndpoint() {
 
   try {
     const url = `/v1/instances/${instanceID}/endpoints/${endpointName}`;
-    const raw = await fetch(url, {
+    const raw = await authenticatedFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: bodyText || '{}',
@@ -450,8 +451,25 @@ function el(tag, className) {
   return e;
 }
 
+async function authenticatedFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  const token = sessionStorage.getItem(API_TOKEN_KEY);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  let resp = await fetch(url, { ...options, headers });
+  if (resp.status === 401 && !token) {
+    const entered = window.prompt('Enter the Bridgekit API token for this tab');
+    if (entered) {
+      sessionStorage.setItem(API_TOKEN_KEY, entered);
+      headers.set('Authorization', `Bearer ${entered}`);
+      resp = await fetch(url, { ...options, headers });
+      if (resp.status === 401) sessionStorage.removeItem(API_TOKEN_KEY);
+    }
+  }
+  return resp;
+}
+
 async function apiFetch(path, options = {}) {
-  const resp = await fetch(API + path, options);
+  const resp = await authenticatedFetch(API + path, options);
   const text = await resp.text();
   let data;
   try { data = JSON.parse(text); } catch { data = text; }

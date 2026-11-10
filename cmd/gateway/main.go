@@ -1,4 +1,4 @@
-// Command gateway runs the Bridgekit gateway and the mock provider it talks to.
+// Command gateway runs the Bridgekit gateway in mock or live-provider mode.
 package main
 
 import (
@@ -16,20 +16,30 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "Gateway listen address")
 	dbPath := flag.String("db", "./bridgekit.db", "SQLite database path")
+	mode := flag.String("mode", envOr("BRIDGEKIT_MODE", "mock"), "Provider mode: mock or live")
 	mockAddr := flag.String("mock-addr", ":8081", "Mock provider listen address, in :port form")
+	publicURL := flag.String("public-url", os.Getenv("BRIDGEKIT_PUBLIC_URL"), "Public gateway base URL for OAuth callbacks")
 	webhookSecret := flag.String("webhook-secret", envOr("BRIDGEKIT_WEBHOOK_SECRET", devWebhookSecret), "Shared HMAC webhook secret")
 	flag.Parse()
 
-	if err := checkWebhookSecret(*webhookSecret, os.Getenv("BRIDGEKIT_ENV") == "production"); err != nil {
+	production := os.Getenv("BRIDGEKIT_ENV") == "production"
+	apiToken := os.Getenv("BRIDGEKIT_API_TOKEN")
+	if (*mode == "live" || production) && len(apiToken) < 32 {
+		fatal("BRIDGEKIT_API_TOKEN must contain at least 32 characters in live or production mode")
+	}
+	if *mode == "live" && !production {
+		fatal("live provider mode requires BRIDGEKIT_ENV=production so real credentials are encrypted at rest")
+	}
+	if err := checkWebhookSecret(*webhookSecret, production); err != nil {
 		fatal("invalid webhook secret", "err", err)
 	}
 
-	// Connectors only know the mock provider's URLs, so it always runs.
-	slog.Info("starting mock provider", "component", "main", "addr", *mockAddr)
-	if err := mock.NewServer(*mockAddr, *webhookSecret).Start(); err != nil {
-		fatal("start mock provider failed", "addr", *mockAddr, "err", err)
+	if *mode == "mock" {
+		slog.Info("starting mock provider", "component", "main", "addr", *mockAddr)
+		if err := mock.NewServer(*mockAddr, *webhookSecret).Start(); err != nil {
+			fatal("start mock provider failed", "addr", *mockAddr, "err", err)
+		}
 	}
-	mockHost := "localhost" + *mockAddr
 
 	db, err := gateway.NewDB(*dbPath)
 	if err != nil {
@@ -37,29 +47,32 @@ func main() {
 	}
 	defer db.Close()
 
-	gw := gateway.New(db, mockHost, *webhookSecret)
+	gw, err := gateway.NewWithOptions(db, gateway.Options{
+		Mode: *mode, MockHost: "localhost" + *mockAddr, WebhookSecret: *webhookSecret, APIToken: apiToken,
+		PublicURL:      *publicURL,
+		GitHubAPIURL:   envOr("GITHUB_API_URL", "https://api.github.com"),
+		GitHubClientID: os.Getenv("GITHUB_CLIENT_ID"), GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+		SlackAPIURL:   envOr("SLACK_API_URL", "https://slack.com/api"),
+		SlackClientID: os.Getenv("SLACK_CLIENT_ID"), SlackClientSecret: os.Getenv("SLACK_CLIENT_SECRET"),
+		StripeAPIURL: envOr("STRIPE_API_URL", "https://api.stripe.com"),
+	})
+	if err != nil {
+		fatal("configure providers failed", "err", err)
+	}
 	if err := gw.Start(*addr); err != nil {
 		fatal("start gateway failed", "addr", *addr, "err", err)
 	}
 
-	slog.Info("bridgekit gateway running", "component", "main", "addr", *addr, "mock_addr", *mockAddr)
+	slog.Info("bridgekit gateway running", "component", "main", "addr", *addr, "mode", *mode)
 	slog.Info("press Ctrl+C to stop", "component", "main")
-
-	// TODO: Shut the HTTP servers down gracefully; today the process exits on
-	// the first signal without draining in-flight requests.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-
 	slog.Info("shutting down", "component", "main")
 }
 
-// devWebhookSecret lets the demo run with no setup. It is public, so production
-// refuses it.
 const devWebhookSecret = "mock_webhook_secret_value"
 
-// checkWebhookSecret rejects secrets anyone could sign with: an empty one, and in
-// production the public development default.
 func checkWebhookSecret(secret string, production bool) error {
 	if secret == "" {
 		return errors.New("webhook secret is empty; set BRIDGEKIT_WEBHOOK_SECRET")
@@ -70,8 +83,6 @@ func checkWebhookSecret(secret string, production bool) error {
 	return nil
 }
 
-// fatal logs and exits; it skips deferred calls, which is fine because it only runs during
-// startup.
 func fatal(msg string, args ...any) {
 	slog.Error(msg, append([]any{"component", "main"}, args...)...)
 	os.Exit(1)

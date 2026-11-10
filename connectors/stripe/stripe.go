@@ -1,26 +1,47 @@
-// Package stripe is the Stripe connector: API-key auth, list_charges paginated by
-// starting_after, and a Stripe-Signature check that matches the mock, not real Stripe
-// (see HandleWebhook).
+// Package stripe is the Stripe connector: API-key auth, charge listing, and webhook verification.
 package stripe
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"bridgekit/sdk"
 )
 
 // Connector is the Stripe connector. API-key auth needs no provider URLs.
-type Connector struct{}
+type Connector struct {
+	apiBaseURL string
+	mock       bool
+	live       bool
+}
 
 // New returns a Stripe connector.
 func New() *Connector {
-	return &Connector{}
+	return &Connector{apiBaseURL: "http://localhost:8081", mock: true}
+}
+
+// NewLive configures Stripe’s production API endpoint.
+func NewLive(apiBaseURL string) *Connector {
+	return &Connector{apiBaseURL: strings.TrimRight(apiBaseURL, "/"), live: true}
+}
+
+func (c *Connector) APIBaseURL() string { return c.apiBaseURL }
+
+func (c *Connector) chargesPath() string {
+	if c.mock {
+		return "/services/stripe/v1/charges"
+	}
+	return "/v1/charges"
 }
 
 func (c *Connector) Metadata() sdk.ConnectorMetadata {
@@ -65,7 +86,7 @@ func (c *Connector) Endpoints() []sdk.EndpointDefinition {
 		{
 			Name:         "list_charges",
 			Method:       "GET",
-			Path:         "/services/stripe/v1/charges",
+			Path:         c.chargesPath(),
 			Description:  "List Stripe charges with offset pagination (starting_after cursor).",
 			OutputSchema: &ChargeList{},
 			Execute:      c.executeListCharges,
@@ -75,7 +96,7 @@ func (c *Connector) Endpoints() []sdk.EndpointDefinition {
 }
 
 func (c *Connector) executeListCharges(ctx context.Context, client *sdk.HTTPClient, req sdk.Request) (sdk.Response, error) {
-	reqURL, err := url.Parse("/services/stripe/v1/charges")
+	reqURL, err := url.Parse(c.chargesPath())
 	if err != nil {
 		return sdk.Response{}, sdk.NewPermanentError("invalid path", http.StatusInternalServerError, err)
 	}
@@ -111,7 +132,7 @@ func (c *Connector) executeListCharges(ctx context.Context, client *sdk.HTTPClie
 // listChargesPaginator pages with starting_after, the ID of the previous page's last charge.
 func (c *Connector) listChargesPaginator(path string, params map[string]string, limit int) sdk.Paginator {
 	return sdk.NewCursorPaginator(
-		"/services/stripe/v1/charges",
+		c.chargesPath(),
 		"starting_after",
 		"limit",
 		limit,
@@ -144,6 +165,7 @@ func (c *Connector) HandleWebhook(ctx context.Context, event sdk.WebhookEvent) e
 
 	sig := ""
 	for _, part := range strings.Split(sigHeader, ",") {
+		part = strings.TrimSpace(part)
 		if strings.HasPrefix(part, "v1=") {
 			sig = part
 			break
@@ -153,10 +175,42 @@ func (c *Connector) HandleWebhook(ctx context.Context, event sdk.WebhookEvent) e
 		return sdk.NewPermanentError("no v1 signature found in Stripe-Signature header", http.StatusBadRequest, nil)
 	}
 
-	// TODO: Verify Stripe's real signed payload "{t}.{body}" and reject stale timestamps.
-	if !sdk.VerifyHMACSHA256HexSignature(event.Payload, sig, "v1=", event.Secret) {
-		return sdk.NewPermanentError("invalid Stripe webhook signature", http.StatusUnauthorized, nil)
+	if !c.live {
+		if !sdk.VerifyHMACSHA256HexSignature(event.Payload, sig, "v1=", event.Secret) {
+			return sdk.NewPermanentError("invalid Stripe webhook signature", http.StatusUnauthorized, nil)
+		}
+		return nil
 	}
-
-	return nil
+	var timestamp string
+	var signatures []string
+	for _, part := range strings.Split(sigHeader, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		if key == "t" {
+			timestamp = value
+		}
+		if key == "v1" {
+			signatures = append(signatures, value)
+		}
+	}
+	unix, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || timestamp == "" || time.Since(time.Unix(unix, 0)) > 5*time.Minute || time.Until(time.Unix(unix, 0)) > 5*time.Minute {
+		return sdk.NewPermanentError("stale or invalid Stripe webhook timestamp", http.StatusUnauthorized, nil)
+	}
+	if len(event.Secret) == 0 {
+		return sdk.NewPermanentError("missing Stripe webhook signing secret", http.StatusUnauthorized, nil)
+	}
+	mac := hmac.New(sha256.New, event.Secret)
+	mac.Write([]byte(timestamp + "."))
+	mac.Write(event.Payload)
+	expected := mac.Sum(nil)
+	for _, candidate := range signatures {
+		got, err := hex.DecodeString(candidate)
+		if err == nil && hmac.Equal(got, expected) {
+			return nil
+		}
+	}
+	return sdk.NewPermanentError("invalid Stripe webhook signature", http.StatusUnauthorized, nil)
 }

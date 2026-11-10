@@ -24,9 +24,7 @@ type schemaProbe struct {
 // probes picks the request sampled per connector; connectors without one get no
 // baseline and are not scanned.
 var probes = map[string]schemaProbe{
-	// TODO: Probe Slack with a read-only endpoint before real providers are supported;
-	// against real Slack this posts a message on every scan.
-	"slack":  {endpoint: "send_message", req: sdk.Request{Body: []byte(`{"channel":"C_PROBE","text":"schema probe"}`)}},
+	"slack":  {endpoint: "auth_test", req: sdk.Request{}},
 	"github": {endpoint: "list_issues", req: sdk.Request{Params: map[string]string{"owner": "probe_owner", "repo": "probe_repo"}}},
 	"stripe": {endpoint: "list_charges", req: sdk.Request{Params: map[string]string{"limit": "3"}}},
 }
@@ -50,18 +48,21 @@ func runProbe(ctx context.Context, conn sdk.Connector, client *sdk.HTTPClient, p
 type DriftDetector struct {
 	db       *DB
 	registry map[string]sdk.Connector
-	mockHost string
+	apiBases map[string]string
 	stopChan chan struct{}
 }
 
-// NewDriftDetector returns a detector that probes connectors through mockHost.
+// NewDriftDetector returns a detector that probes the supplied mock provider.
 func NewDriftDetector(db *DB, registry map[string]sdk.Connector, mockHost string) *DriftDetector {
-	return &DriftDetector{
-		db:       db,
-		registry: registry,
-		mockHost: mockHost,
-		stopChan: make(chan struct{}),
+	bases := make(map[string]string, len(registry))
+	for id := range registry {
+		bases[id] = "http://" + mockHost
 	}
+	return NewDriftDetectorWithBases(db, registry, bases)
+}
+
+func NewDriftDetectorWithBases(db *DB, registry map[string]sdk.Connector, apiBases map[string]string) *DriftDetector {
+	return &DriftDetector{db: db, registry: registry, apiBases: apiBases, stopChan: make(chan struct{})}
 }
 
 // Start scans every interval in the background; the first scan runs after one interval.
@@ -136,7 +137,7 @@ func (d *DriftDetector) scanInstance(inst *ConnectorInstance) {
 	// Scans never refresh tokens: an expired token fails the probe until a user request
 	// refreshes it.
 	client := sdk.NewHTTPClient(
-		"http://"+d.mockHost,
+		d.apiBases[inst.ConnectorID],
 		*creds,
 		conn.AuthConfig(),
 		func(ctx context.Context, token *sdk.Token) (*sdk.Token, error) {

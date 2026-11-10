@@ -55,7 +55,7 @@ func (s *Server) handleExecuteEndpoint(w http.ResponseWriter, r *http.Request, i
 	}
 
 	client := sdk.NewHTTPClient(
-		"http://"+s.mockHost,
+		s.apiBases[inst.ConnectorID],
 		*creds,
 		conn.AuthConfig(),
 		s.tokenRefreshHook(instanceID, conn),

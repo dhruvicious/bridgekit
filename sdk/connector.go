@@ -36,9 +36,12 @@ type AuthConfig struct {
 
 // OAuth2Config holds the provider's authorize and token URLs and the install scopes.
 type OAuth2Config struct {
-	AuthURL  string   `json:"auth_url"`
-	TokenURL string   `json:"token_url"`
-	Scopes   []string `json:"scopes"`
+	AuthURL      string   `json:"auth_url"`
+	TokenURL     string   `json:"token_url"`
+	ClientID     string   `json:"client_id,omitempty"`
+	ClientSecret string   `json:"-"`
+	RedirectURL  string   `json:"redirect_url,omitempty"`
+	Scopes       []string `json:"scopes"`
 }
 
 // APIKeyConfig names the header that carries the key and an optional value prefix

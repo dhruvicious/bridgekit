@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -71,7 +70,10 @@ func (s *Server) handleInstallConnector(w http.ResponseWriter, r *http.Request) 
 	if authCfg.Type == sdk.AuthTypeOAuth2 {
 		// state ties the callback to this install and guards against CSRF.
 		stateBytes := make([]byte, 16)
-		rand.Read(stateBytes)
+		if _, err := rand.Read(stateBytes); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "Failed to create OAuth state")
+			return
+		}
 		state := hex.EncodeToString(stateBytes)
 
 		if !s.rememberOAuthState(state, connectorID) {
@@ -79,9 +81,14 @@ func (s *Server) handleInstallConnector(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		// TODO: Derive the redirect URI and client ID from configuration; they
-		// are hardcoded for the mock provider and a gateway on :8080.
-		redirectURI := "http://localhost:8080/oauth/callback"
+		redirectURI := authCfg.OAuth2.RedirectURL
+		clientID := authCfg.OAuth2.ClientID
+		if redirectURI == "" {
+			redirectURI = "http://localhost:8080/oauth/callback"
+		}
+		if clientID == "" {
+			clientID = "bridgekit_client_" + connectorID
+		}
 		authURL, err := url.Parse(authCfg.OAuth2.AuthURL)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "Invalid authorize URL")
@@ -89,7 +96,7 @@ func (s *Server) handleInstallConnector(w http.ResponseWriter, r *http.Request) 
 		}
 
 		q := authURL.Query()
-		q.Set("client_id", "bridgekit_client_"+connectorID)
+		q.Set("client_id", clientID)
 		q.Set("redirect_uri", redirectURI)
 		q.Set("state", state)
 		q.Set("scope", strings.Join(authCfg.OAuth2.Scopes, " "))
@@ -132,11 +139,10 @@ func (s *Server) handleInstallConnector(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
-	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
 
-	if code == "" || state == "" {
-		writeJSONError(w, http.StatusBadRequest, "Missing code or state")
+	if state == "" {
+		writeJSONError(w, http.StatusBadRequest, "Missing OAuth state")
 		return
 	}
 
@@ -146,22 +152,44 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Query().Get("error") != "" {
+		writeJSONError(w, http.StatusBadRequest, "OAuth authorization was denied")
+		return
+	}
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		writeJSONError(w, http.StatusBadRequest, "Missing authorization code")
+		return
+	}
 	conn := s.registry[connectorID]
 	authCfg := conn.AuthConfig()
 
 	tokenURL := authCfg.OAuth2.TokenURL
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	// TODO: Read client credentials from configuration instead of deriving
-	// them from the connector ID, which only the mock provider accepts.
 	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("client_id", "bridgekit_client_"+connectorID)
-	form.Set("client_secret", "bridgekit_secret_"+connectorID)
-	form.Set("redirect_uri", "http://localhost:8080/oauth/callback")
+	clientID, clientSecret := authCfg.OAuth2.ClientID, authCfg.OAuth2.ClientSecret
+	redirectURI := authCfg.OAuth2.RedirectURL
+	if clientID == "" {
+		clientID = "bridgekit_client_" + connectorID
+		clientSecret = "bridgekit_secret_" + connectorID
+	}
+	if redirectURI == "" {
+		redirectURI = "http://localhost:8080/oauth/callback"
+	}
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("redirect_uri", redirectURI)
 
-	resp, err := client.PostForm(tokenURL, form)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Failed to create token request")
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "Failed to exchange authorization code: "+err.Error())
 		return
@@ -169,8 +197,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("Token exchange returned status %d: %s", resp.StatusCode, string(bodyBytes)))
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("Token exchange returned status %d", resp.StatusCode))
 		return
 	}
 
@@ -184,11 +211,15 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := &sdk.Token{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		Expiry:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	if tokenResp.AccessToken == "" {
+		writeJSONError(w, http.StatusBadGateway, "OAuth provider returned no access token")
+		return
 	}
+	var expiry time.Time
+	if tokenResp.ExpiresIn > 0 {
+		expiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	}
+	token := &sdk.Token{AccessToken: tokenResp.AccessToken, RefreshToken: tokenResp.RefreshToken, Expiry: expiry}
 
 	inst, err := s.createInstance(conn, sdk.AuthTypeOAuth2, &sdk.Credentials{Token: token})
 	if err != nil {
@@ -356,7 +387,7 @@ func (s *Server) generateBaseline(instanceID string, conn sdk.Connector, creds *
 	slog.Info("capturing baseline schema", "component", "gateway", "instance_id", instanceID, "connector", connectorID)
 
 	client := sdk.NewHTTPClient(
-		"http://"+s.mockHost,
+		s.apiBases[connectorID],
 		*creds,
 		conn.AuthConfig(),
 		s.tokenRefreshHook(instanceID, conn),
