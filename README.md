@@ -1,21 +1,25 @@
 # Bridgekit
 
-A self-hosted gateway for calling third-party APIs through a consistent, locally operated interface. Bridgekit is being built around real provider APIs; it does not start a mock provider or pretend provider calls succeeded.
-
-## Status
-
-Early implementation. The initial version provides configuration, an HTTP health endpoint, and provider-backed connector foundations. Provider credentials and OAuth app configuration are supplied by the operator.
+A self-hosted Go gateway that exposes a small, consistent HTTP interface over real GitHub, Stripe, and Slack APIs. Provider API URLs default to their official services; no mock server is included.
 
 ## Run
 
+Set the provider credentials you want to use, then start the gateway:
+
 ```sh
 cp .env.example .env
-# configure the values you need
+export GITHUB_TOKEN=...
+export STRIPE_SECRET_KEY=...
+export SLACK_BOT_TOKEN=...
 go run ./cmd/bridgekit
 ```
 
-The gateway listens on `:8080` by default. `GET /healthz` reports readiness.
+The server listens on `:8080` by default. `GET /healthz` reports process health. Credentials are read from the process environment; use your deployment platform's secret manager, and do not expose this unauthenticated gateway publicly.
 
-## Security
+## HTTP API
 
-Set a random 32-byte base64 `BRIDGEKIT_ENCRYPTION_KEY` before storing credentials. Do not expose the gateway publicly without adding an authentication layer and TLS termination.
+- `GET /v1/github/repos?owner=OWNER` — list authenticated user's repositories or a public owner's repositories. GitHub token required.
+- `GET /v1/stripe/charges?limit=25` — list charges (limit from 1 to 100). Stripe secret key required.
+- `POST /v1/slack/messages` — post a message. JSON body: `{"channel":"C123","text":"Hello"}`. Slack bot token required.
+
+Provider failures are returned as `502`; missing credentials are returned as `503`. The gateway does not store credentials, implement OAuth installation, or verify inbound webhooks yet. Those require provider-specific registration and security work before production use.
